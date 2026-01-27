@@ -9,121 +9,147 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
+/* ======================
+   STATIC
+====================== */
 app.use(express.static(__dirname));
 
-/* ==========================
-   REDIS
-========================== */
+/* ======================
+   REDIS (RENDER SAFE)
+====================== */
 const pubClient = createClient({
   url: process.env.REDIS_URL
 });
+
 const subClient = pubClient.duplicate();
+
+/* âš ï¸ NUNCA deixe Redis sem handler de erro */
+pubClient.on("error", err => {
+  console.error("Redis PUB error:", err.message);
+});
+
+subClient.on("error", err => {
+  console.error("Redis SUB error:", err.message);
+});
 
 (async () => {
   await pubClient.connect();
   await subClient.connect();
+
   io.adapter(createAdapter(pubClient, subClient));
-  console.log("Redis conectado");
+  console.log("Redis adapter conectado");
 })();
 
-/* ==========================
+/* ======================
    ESTADO DAS SALAS
-========================== */
+====================== */
+/*
+rooms = {
+  sala1: {
+    users: Map(socket.id -> username),
+    serialOwner: socket.id | null
+  }
+}
+*/
 const rooms = {};
-// rooms[room] = { serialOwner: socket.id, serialUser: username }
 
-/* ==========================
+/* ======================
    SOCKET.IO
-========================== */
+====================== */
 io.on("connection", socket => {
   let currentRoom = null;
-  let username = "Anônimo";
+  let username = null;
 
+  /* ===== ENTRAR NA SALA ===== */
   socket.on("join-room", ({ room, user }) => {
     currentRoom = room;
-    username = user || "Anônimo";
+    username = user;
 
     socket.join(room);
 
     if (!rooms[room]) {
       rooms[room] = {
-        serialOwner: null,
-        serialUser: null
+        users: new Map(),
+        serialOwner: null
       };
     }
 
-    // envia estado atual da serial para quem entrou
-    io.to(room).emit("serial-status", {
-      connected: !!rooms[room].serialOwner,
-      user: rooms[room].serialUser
+    rooms[room].users.set(socket.id, username);
+
+    io.to(room).emit("room-info", {
+      users: [...rooms[room].users.values()],
+      serialOwner: rooms[room].serialOwner
+        ? rooms[room].users.get(rooms[room].serialOwner)
+        : null
     });
-
-    io.to(room).emit("system", `${username} entrou na sala`);
   });
 
-  /* ===== CONECTAR SERIAL ===== */
-  socket.on("serial-connect", () => {
+  /* ===== SERIAL OPEN (BROWSER API OWNER) ===== */
+  socket.on("serial-owner", () => {
     if (!currentRoom) return;
 
-    if (rooms[currentRoom].serialOwner) return;
-
-    rooms[currentRoom].serialOwner = socket.id;
-    rooms[currentRoom].serialUser = username;
-
-    io.to(currentRoom).emit("serial-status", {
-      connected: true,
-      user: username
-    });
-
-    io.to(currentRoom).emit(
-      "system",
-      `Serial conectada por ${username}`
-    );
-  });
-
-  /* ===== DADOS DIGITADOS ===== */
-  socket.on("serial-write", data => {
-    if (!currentRoom) return;
-
-    const owner = rooms[currentRoom].serialOwner;
-    if (!owner) return;
-
-    io.to(owner).emit("serial-tx", data);
-    socket.to(currentRoom).emit("terminal", data);
-  });
-
-  /* ===== DADOS VINDOS DA SERIAL ===== */
-  socket.on("serial-rx", data => {
-    if (!currentRoom) return;
-    io.to(currentRoom).emit("terminal", data);
-  });
-
-  socket.on("disconnect", () => {
-    if (!currentRoom) return;
-
-    if (rooms[currentRoom].serialOwner === socket.id) {
-      rooms[currentRoom].serialOwner = null;
-      rooms[currentRoom].serialUser = null;
-
-      io.to(currentRoom).emit("serial-status", {
-        connected: false,
-        user: null
-      });
-
-      io.to(currentRoom).emit("system", "Serial desconectada");
+    if (rooms[currentRoom].serialOwner) {
+      socket.emit("serial-denied");
+      return;
     }
 
-    io.to(currentRoom).emit(
-      "system",
-      `${username} saiu`
-    );
+    rooms[currentRoom].serialOwner = socket.id;
+
+    io.to(currentRoom).emit("serial-status", {
+      owner: username
+    });
+  });
+
+  /* ===== DADOS DA SERIAL (VINDOS DO BROWSER) ===== */
+  socket.on("serial-rx", data => {
+    if (!currentRoom) return;
+
+    /* broadcast puro, sem eco local */
+    socket.to(currentRoom).emit("serial-data", data);
+  });
+
+  /* ===== DADOS PARA SERIAL ===== */
+  socket.on("serial-tx", data => {
+    if (!currentRoom) return;
+    if (rooms[currentRoom].serialOwner !== socket.id) return;
+
+    /* envia para todos (inclusive owner) */
+    io.to(currentRoom).emit("serial-write", data);
+  });
+
+  /* ===== SAÃDA ===== */
+  socket.on("disconnect", () => {
+    if (!currentRoom || !rooms[currentRoom]) return;
+
+    rooms[currentRoom].users.delete(socket.id);
+
+    /* se quem saiu era dono da serial */
+    if (rooms[currentRoom].serialOwner === socket.id) {
+      rooms[currentRoom].serialOwner = null;
+
+      io.to(currentRoom).emit("serial-status", {
+        owner: null
+      });
+    }
+
+    io.to(currentRoom).emit("room-info", {
+      users: [...rooms[currentRoom].users.values()],
+      serialOwner: rooms[currentRoom].serialOwner
+        ? rooms[currentRoom].users.get(rooms[currentRoom].serialOwner)
+        : null
+    });
+
+    /* limpa sala vazia */
+    if (rooms[currentRoom].users.size === 0) {
+      delete rooms[currentRoom];
+    }
   });
 });
 
-/* ==========================
+/* ======================
    SERVER
-========================== */
+====================== */
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log("Servidor rodando na porta", PORT);
+  console.log(`Multty rodando na porta ${PORT}`);
 });
