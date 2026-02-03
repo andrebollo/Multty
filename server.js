@@ -1,67 +1,114 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const redis = require('redis');
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+
+const { createClient } = require("redis");
+const { createAdapter } = require("@socket.io/redis-adapter");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server);
 
-// Configuração resiliente do Redis
-const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+app.use(express.static(__dirname));
 
-const client = redis.createClient({
-    url: redisUrl,
-    socket: {
-        reconnectStrategy: (retries) => {
-            if (retries > 10) return new Error('Redis desistiu após 10 tentativas');
-            return Math.min(retries * 100, 3000); // Tenta reconectar a cada 3s
-        },
-        // Se a URL começar com rediss:// (com dois S), o Render exige TLS
-        tls: redisUrl.startsWith('rediss://') ? { rejectUnauthorized: false } : undefined
-    }
+/* ==========================
+   REDIS (OBRIGATÓRIO EM PROD)
+========================== */
+const pubClient = createClient({
+  url: process.env.REDIS_URL
 });
 
-client.on('error', (err) => console.error('Erro no Cliente Redis:', err));
-client.on('connect', () => console.log('Redis Conectando...'));
-client.on('reconnecting', () => console.log('Redis Reconectando...'));
-client.on('ready', () => console.log('Redis Pronto e Conectado!'));
+const subClient = pubClient.duplicate();
 
-async function startServer() {
-    try {
-        await client.connect();
-        
-        app.use(express.static(__dirname));
+(async () => {
+  await pubClient.connect();
+  await subClient.connect();
+  io.adapter(createAdapter(pubClient, subClient));
+  console.log("Redis conectado");
+})();
 
-        io.on('connection', (socket) => {
-            let currentRoom = null;
+/* ==========================
+   ESTADO POR SALA
+========================== */
+const rooms = {}; 
+// rooms[sala] = { serialOwner: socket.id }
 
-            socket.on('join-room', async ({ room, user }) => {
-                currentRoom = room;
-                socket.join(room);
-                try {
-                    const screenState = await client.get(`terminal:${room}:data`);
-                    socket.emit('terminal-init', screenState || "--- MULtty Serial Terminal ---\n");
-                } catch (e) { console.error("Erro ao ler Redis:", e); }
-            });
+/* ==========================
+   SOCKET.IO
+========================== */
+io.on("connection", socket => {
+  let currentRoom = null;
+  let username = "Anônimo";
 
-            socket.on('terminal-input', async (data) => {
-                if (currentRoom && client.isOpen) {
-                    socket.to(currentRoom).emit('terminal-output', data);
-                    await client.append(`terminal:${currentRoom}:data`, data);
-                }
-            });
+  socket.on("join-room", ({ room, user }) => {
+    username = user || "Anônimo";
+    currentRoom = room;
 
-            socket.on('send-msg', (payload) => {
-                if (currentRoom) io.to(currentRoom).emit('new-msg', payload);
-            });
-        });
+    socket.join(room);
 
-        const PORT = process.env.PORT || 3000;
-        server.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
-    } catch (err) {
-        console.error('Falha crítica ao iniciar Redis:', err);
+    if (!rooms[room]) {
+      rooms[room] = { serialOwner: null };
     }
-}
 
-startServer();
+    io.to(room).emit("system", `${username} entrou na sala`);
+  });
+
+  /* ===== USUÁRIO CONECTA A SERIAL ===== */
+  socket.on("serial-connect", room => {
+    if (!rooms[room]) return;
+
+    rooms[room].serialOwner = socket.id;
+
+    io.to(room).emit(
+      "system",
+      `${username} conectou a serial`
+    );
+  });
+
+  /* ===== DADOS DIGITADOS ===== */
+  socket.on("serial-write", data => {
+    if (!currentRoom) return;
+
+    const owner = rooms[currentRoom]?.serialOwner;
+
+    if (!owner) return;
+
+    // envia apenas para quem tem a serial aberta
+    io.to(owner).emit("serial-tx", data);
+
+    // mostra no terminal de todos (uma vez só)
+    socket.to(currentRoom).emit("terminal", data);
+  });
+
+  /* ===== DADOS VINDOS DA SERIAL ===== */
+  socket.on("serial-rx", data => {
+    if (!currentRoom) return;
+
+    io.to(currentRoom).emit("terminal", data);
+  });
+
+  socket.on("disconnect", () => {
+    if (!currentRoom) return;
+
+    if (rooms[currentRoom]?.serialOwner === socket.id) {
+      rooms[currentRoom].serialOwner = null;
+      io.to(currentRoom).emit(
+        "system",
+        "Serial desconectada"
+      );
+    }
+
+    io.to(currentRoom).emit(
+      "system",
+      `${username} saiu`
+    );
+  });
+});
+
+/* ==========================
+   SERVER
+========================== */
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log("Servidor rodando na porta", PORT);
+});
