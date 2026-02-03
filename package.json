@@ -1,17 +1,18 @@
 {
-  "name": "multty-terminal",
+  "name": "multty",
   "version": "1.0.0",
-  "description": "Terminal Serial Colaborativo",
+  "description": "",
   "main": "server.js",
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "redis": "^4.6.10",
-    "socket.io": "^4.7.2"
-  },
   "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.2.1",
+    "serialport": "^13.0.0",
+    "socket.io": "^4.8.3"
   }
 }
