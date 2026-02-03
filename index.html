@@ -1,133 +1,190 @@
 <!DOCTYPE html>
 <html lang="pt-br">
 <head>
-    <meta charset="UTF-8">
-    <title>MULtty - Serial Terminal</title>
-    <script src="/socket.io/socket.io.js"></script>
-    <style>
-        body { font-family: monospace; margin: 0; background: #0c0c0c; color: #cccccc; height: 100vh; display: flex; flex-direction: column; }
-        header { background: #1e1e1e; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #333; }
-        .controls input { background: #333; border: 1px solid #444; color: white; padding: 5px; border-radius: 3px; }
-        .btn-serial { background: #e91e63; color: white; border: none; padding: 8px 15px; cursor: pointer; font-weight: bold; border-radius: 3px; }
-        .btn-serial.connected { background: #4caf50; }
-        .title { font-size: 2rem; color: #00ff00; font-weight: bold; }
-        
-        main { display: flex; flex: 1; min-height: 0; padding: 10px; gap: 10px; }
-        .left-panel { flex: 1; display: flex; flex-direction: column; background: #1e1e1e; border-radius: 5px; padding: 10px; }
-        .right-panel { flex: 3; display: flex; flex-direction: column; }
-
-        #terminal { flex: 1; background: black; color: #00ff00; padding: 15px; border-radius: 5px; overflow-y: auto; white-space: pre-wrap; font-size: 14px; outline: none; border: 1px solid #333; }
-        #chat-box { flex: 1; overflow-y: auto; font-size: 0.9em; margin-bottom: 10px; border-bottom: 1px solid #333; }
-        #chat-input { background: #222; border: 1px solid #444; color: white; width: 100%; padding: 8px; }
-        #user-list { font-size: 0.8em; color: #888; margin-top: 5px; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Multty Web Serial</title>
+<style>
+body { margin:0; font-family: monospace; }
+#container { padding:5px; }
+#top { display:flex; gap:5px; align-items:center; }
+textarea { width:100%; box-sizing:border-box; }
+#terminal { height:300px; }
+#console { height:120px; background:#eee; margin-top:5px; }
+#info { height:60px; background:#ddd; margin-top:5px; overflow:auto; }
+button { padding:4px 8px; margin:2px; }
+#keyInput { position:fixed; bottom:0; left:0; width:1px; height:1px; opacity:0.01; }
+#pasteModal { display:none; position:fixed; top:20%; left:50%; transform:translateX(-50%);
+  background:#fff; border:1px solid #333; padding:10px; z-index:1000; width:90%; max-width:400px;}
+</style>
 </head>
 <body>
 
-<header>
-    <div class="controls">
-        <input type="text" id="username" placeholder="Usuário">
-        <input type="text" id="room" placeholder="Sala">
-        <button onclick="join()" style="background: #1a237e; color: white; border: none; padding: 8px;">Entrar</button>
-        <button id="serial-btn" class="btn-serial" onclick="connectSerial()">CONECTAR SERIAL</button>
-    </div>
-    <div class="title">MULtty</div>
-</header>
+<div id="container">
+  <div id="top">
+    Usuário: <input id="username" size="10" placeholder="Nome">
+    Sala: <input id="room" size="6" placeholder="Sala">
+    <button onclick="joinRoom()">Entrar</button>
+    <label><input type="checkbox" id="echo"> Eco</label>
+  </div>
 
-<main>
-    <section class="left-panel">
-        <div id="chat-box"></div>
-        <input type="text" id="chat-input" placeholder="Chat..." onkeypress="handleChat(event)">
-        <div id="user-list">Na sala: <span id="users">-</span></div>
-    </section>
+  <textarea id="terminal" readonly onclick="focusTerminal()"></textarea>
+  <textarea id="console" readonly></textarea>
+  <textarea id="info" readonly></textarea>
 
-    <section class="right-panel">
-        <div id="terminal" tabindex="0">Aguardando entrada...</div>
-    </section>
-</main>
+  <div>
+    <button onclick="sendChar('\r')">⏎</button>
+    <button onclick="sendChar('\b')">⌫</button>
+    <button onclick="sendChar('\x1B[A')">↑</button>
+    <button onclick="sendChar('\x1B[B')">↓</button>
+    <button onclick="sendChar('\x1B[C')">→</button>
+    <button onclick="sendChar('\x1B[D')">←</button>
+    <button onclick="sendChar('\t')">Tab</button>
+    Ctrl+<input id="ctrlChar" size="1">
+    <button onclick="sendCtrl()">Ctrl</button>
+    Alt+<input id="altChar" size="1">
+    <button onclick="sendAlt()">Alt</button>
+    <button onclick="openPaste()">Colar</button>
+    <button onclick="connectSerial()">Conectar Serial (Master)</button>
+  </div>
 
+  <input id="keyInput" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+</div>
+
+<!-- MODAL COLAR -->
+<div id="pasteModal">
+  <b>Colar texto</b><br><br>
+  <textarea id="paste" style="width:100%; height:120px;"></textarea><br>
+  <button onclick="sendPaste()">Enviar</button>
+  <button onclick="closePaste()">Cancelar</button>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
 <script>
-    const socket = io();
-    const term = document.getElementById('terminal');
-    let port, writer, reader;
+const socket = io();
+const term = document.getElementById("terminal");
+const cons = document.getElementById("console");
+const info = document.getElementById("info");
+const keyInput = document.getElementById("keyInput");
 
-    // --- Lógica Serial ---
-    async function connectSerial() {
-        try {
-            port = await navigator.serial.requestPort();
-            await port.open({ baudRate: 9600 });
-            
-            const btn = document.getElementById('serial-btn');
-            btn.innerText = "SERIAL ONLINE";
-            btn.classList.add('connected');
-            
-            writer = port.writable.getWriter();
-            readSerial();
-        } catch (err) {
-            console.error('Erro Serial:', err);
-            alert("Falha ao conectar Serial. Verifique as permissões.");
-        }
+let roomName = "";
+let username = "";
+let serialPort = null;
+let writer = null;
+
+/* FOCO NO TERMINAL */
+function focusTerminal() { keyInput.focus(); }
+
+/* ======================
+   SALA E USUÁRIO
+====================== */
+function joinRoom() {
+  username = document.getElementById("username").value || "Anon";
+  roomName = document.getElementById("room").value || "Sala1";
+  socket.emit("join-room", { username, room: roomName });
+}
+
+/* ======================
+   SERIAL (MASTER)
+====================== */
+async function connectSerial() {
+  if (!roomName) return alert("Entre em uma sala primeiro");
+  try {
+    serialPort = await navigator.serial.requestPort();
+    await serialPort.open({ baudRate: 9600 });
+    writer = serialPort.writable.getWriter();
+    socket.emit("set-master", roomName);
+    info.value += "Serial conectada como master\n";
+    readLoop();
+  } catch(e) { alert("Erro: " + e); }
+}
+
+async function readLoop() {
+  const reader = serialPort.readable.getReader();
+  while(true){
+    const { value, done } = await reader.read();
+    if(done) break;
+    if(value){
+      const text = new TextDecoder().decode(value);
+      socket.emit("serial-data", { room: roomName, data: text });
     }
+  }
+}
 
-    async function readSerial() {
-        reader = port.readable.getReader();
-        try {
-            while (true) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                const text = new TextDecoder().decode(value);
-                updateTerminal(text, true); // Envia o que recebeu para os outros
-            }
-        } finally {
-            reader.releaseLock();
-        }
-    }
+async function writeSerial(data) {
+  if(writer) await writer.write(new TextEncoder().encode(data));
+}
 
-    // --- Lógica de Sincronização ---
-    function join() {
-        const u = document.getElementById('username').value;
-        const r = document.getElementById('room').value;
-        if(u && r) socket.emit('join-room', { room: r, user: u });
-    }
+/* ======================
+   ENVIAR DADOS
+====================== */
+function sendChar(ch){
+  if(roomName==="") return;
+  socket.emit("serial-write", { room: roomName, data: ch });
+}
 
-    function updateTerminal(data, shouldBroadcast) {
-        term.innerText += data;
-        term.scrollTop = term.scrollHeight;
-        if (shouldBroadcast) socket.emit('terminal-input', data);
-    }
+/* ======================
+   CTRL / ALT
+====================== */
+function sendCtrl(){
+  const c = document.getElementById("ctrlChar").value;
+  if(!c) return;
+  sendChar(String.fromCharCode(c.toUpperCase().charCodeAt(0)-64));
+}
 
-    socket.on('terminal-init', (data) => term.innerText = data);
-    socket.on('terminal-output', (data) => updateTerminal(data, false));
+function sendAlt(){
+  const c = document.getElementById("altChar").value;
+  if(!c) return;
+  sendChar("\x1b"+c);
+}
 
-    // Captura teclas especiais e envia para o Serial
-    term.addEventListener('keydown', async (e) => {
-        e.preventDefault();
-        let data = e.key;
-        
-        // Tratamento simples de teclas especiais
-        if (e.key === 'Enter') data = '\r\n';
-        if (e.key === 'Backspace') data = '\x08';
-        if (e.key === 'Tab') data = '\t';
-        if (e.ctrlKey && e.key === 'c') data = '\x03'; // Ctrl+C
+/* ======================
+   COLAR
+====================== */
+function openPaste(){ document.getElementById("pasteModal").style.display="block"; }
+function closePaste(){ document.getElementById("pasteModal").style.display="none"; }
+function sendPaste(){
+  sendChar(document.getElementById("paste").value.replace(/\n/g,"\r"));
+  document.getElementById("paste").value="";
+  closePaste();
+}
 
-        if (writer) {
-            await writer.write(new TextEncoder().encode(data));
-        }
-        // Se você quer que os outros vejam o que VOCÊ digitou (echo)
-        // Alguns equipamentos fazem echo automático, se não fizerem, descomente abaixo:
-        // updateTerminal(data, true); 
-    });
+/* ======================
+   TECLADO
+====================== */
+keyInput.addEventListener("input", () => {
+  if(!keyInput.value) return;
+  sendChar(keyInput.value);
+  if(document.getElementById("echo").checked)
+    appendTerminal(keyInput.value);
+  keyInput.value="";
+});
+keyInput.addEventListener("keydown", e=>{
+  if(e.key==="Backspace"){ sendChar('\b'); e.preventDefault(); }
+  else if(e.key==="Enter"){ sendChar('\r'); e.preventDefault(); }
+  else if(e.key==="Tab"){ sendChar('\t'); e.preventDefault(); }
+});
 
-    // --- Chat ---
-    function handleChat(e) {
-        if (e.key === 'Enter') {
-            socket.emit('send-msg', { user: document.getElementById('username').value, msg: e.target.value });
-            e.target.value = '';
-        }
-    }
-    socket.on('new-msg', d => {
-        document.getElementById('chat-box').innerHTML += `<div><strong>${d.user}:</strong> ${d.msg}</div>`;
-    });
+/* ======================
+   SOCKET EVENTS
+====================== */
+socket.on("serial-data", data => appendTerminal(data));
+socket.on("serial-master-write", async data => { if(writer) await writeSerial(data); });
+socket.on("serial-echo", data => { if(document.getElementById("echo").checked) appendTerminal(data); });
+socket.on("console-log", msg => { cons.value+=msg+"\n"; cons.scrollTop=cons.scrollHeight; });
+socket.on("system-log", msg => { info.value+=msg+"\n"; info.scrollTop=info.scrollHeight; });
+socket.on("room-info", msg => { info.value+=msg+"\n"; info.scrollTop=info.scrollHeight; });
+
+/* ======================
+   TERMINAL DISPLAY
+====================== */
+function appendTerminal(data){
+  for(let ch of data){
+    if(ch === "\b") term.value = term.value.slice(0,-1);
+    else term.value += ch;
+  }
+  term.scrollTop = term.scrollHeight;
+}
 </script>
 </body>
 </html>
