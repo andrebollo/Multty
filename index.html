@@ -31,7 +31,7 @@
             overflow: hidden;
         }
 
-        /* --- CABEÇALHO (Sempre visível) --- */
+        /* CABEÇALHO */
         header {
             display: flex;
             justify-content: space-between;
@@ -43,7 +43,7 @@
             flex-shrink: 0;
         }
 
-        /* --- SOBREPOSIÇÃO DE LOGIN (Centralizado) --- */
+        /* SOBREPOSIÇÃO DE LOGIN */
         #login-overlay {
             position: fixed;
             top: 0;
@@ -116,7 +116,7 @@
             transition: background 0.2s;
         }
         button:hover:not(:disabled) { opacity: 0.8; }
-        button:disabled { background-color: #555; cursor: not-allowed; }
+        button:disabled { background-color: #444; cursor: not-allowed; color: #aaa; }
 
         .app-title {
             font-size: 1.5rem;
@@ -125,7 +125,7 @@
             letter-spacing: 2px;
         }
 
-        /* --- INTERFACE PRINCIPAL --- */
+        /* INTERFACE PRINCIPAL */
         .main-container {
             display: flex;
             flex: 1;
@@ -376,7 +376,7 @@
         <div class="right-column">
             <div class="panel" id="terminal-panel" onclick="focusTerminalInput()">
                 <div class="panel-header">Terminal</div>
-                <div id="terminal-output">Aguardando conexão serial...</div>
+                <div id="terminal-output"></div>
                 
                 <div class="terminal-controls">
                     <button class="btn-special" onclick="pasteToSerial()">Colar</button>
@@ -425,7 +425,7 @@
         let serialWriter = null;
         let serialReader = null;
         let isSerialConnected = false;
-        let serialLockedBy = null;
+        let serialLockedBy = null; // ID do usuário dono da serial
 
         let serialOutBuffer = ""; 
         let flushTimer = null;
@@ -468,7 +468,6 @@
             elChatInput.disabled = false;
             elBtnSendChat.disabled = false;
 
-            addSystemMessage("Iniciando conexão segura (WSS) com broker.emqx.io...", 'system');
             initMQTT();
         }
 
@@ -499,7 +498,6 @@
 
         function onConnect() {
             isConnectedToMQTT = true;
-            addSystemMessage("Conectado ao chat com sucesso!", 'system');
 
             const topicBase = `multry/${currentRoom}`;
             
@@ -509,6 +507,7 @@
             mqttClient.subscribe(`${topicBase}/serial/input`);
             mqttClient.subscribe(`${topicBase}/serial/lock`);
 
+            // Anuncia minha entrada e solicita status atual
             publishMessage(`${topicBase}/presence`, JSON.stringify({
                 type: 'join',
                 id: myId,
@@ -516,11 +515,8 @@
                 hasSerial: false
             }));
 
-            if (!serialLockedBy) {
-                elBtnConnectSerial.disabled = false;
-            }
-
-            focusTerminalInput();
+            // Se já sabemos que alguém tem a serial (presença em cache), atualiza UI imediatamente
+            updateLockUI();
         }
 
         function onConnectionLost(responseObject) {
@@ -596,10 +592,14 @@
                 else if (topic === `${topicBase}/serial/data`) {
                     if (isSerialConnected) {
                         logSerialData(payload, 'rx');
-                    } else {
-                        processIncomingText(payload);
-                        logSerialData(payload, 'rx');
-                    }
+                    // Se sou o dono, não processo visualmente aqui porque o processIncomingText já cuida disso no loop de leitura
+                    // Mas logs de RX ajudam debug
+                    logSerialData(payload, 'rx'); 
+                } else {
+                    // Sou remoto
+                    processIncomingText(payload);
+                    logSerialData(payload, 'rx');
+                }
                 }
                 else if (topic === `${topicBase}/serial/input`) {
                     if (isSerialConnected && serialWriter) {
@@ -651,8 +651,18 @@
 
             if (data.type === 'join') {
                 if (!users[data.id]) {
-                    users[data.id] = { name: data.name, hasSerial: false };
-                    addSystemMessage(`${data.name} entrou na sala.`);
+                    users[data.id] = { name: data.name, hasSerial: data.hasSerial };
+                    
+                    // Se o novo usuário tem a serial, atualiza o estado local imediatamente
+                    if (data.hasSerial) {
+                        serialLockedBy = data.id;
+                        updateLockUI();
+                        addSystemMessage(`${data.name} conectou e está com a serial.`, 'system');
+                    } else {
+                        addSystemMessage(`${data.name} entrou na sala.`, 'system');
+                    }
+                    
+                    // Responde com meu status (para ele saber se eu tenho a serial)
                     const topicBase = `multry/${currentRoom}`;
                     publishMessage(`${topicBase}/presence`, JSON.stringify({
                         type: 'announce',
@@ -664,11 +674,23 @@
             } 
             else if (data.type === 'announce') {
                 users[data.id] = { name: data.name, hasSerial: data.hasSerial };
+                
+                // Verifica se esse usuário tem a serial para atualizar meu botão
+                if (data.hasSerial) {
+                    serialLockedBy = data.id;
+                    updateLockUI();
+                }
             }
             else if (data.type === 'leave') {
                 if (users[data.id]) {
-                    addSystemMessage(`${users[data.id].name} saiu da sala.`);
+                    addSystemMessage(`${users[data.id].name} saiu da sala.`, 'system');
                     delete users[data.id];
+                    
+                    // Se ele saiu e tinha a serial, limpa o lock
+                    if (serialLockedBy === data.id) {
+                        serialLockedBy = null;
+                        updateLockUI();
+                    }
                 }
             }
             else if (data.type === 'update_serial') {
@@ -704,6 +726,33 @@
             }
         }
 
+        // Função separada para atualizar a UI do botão e mensagem
+        function updateLockUI() {
+            if (serialLockedBy && serialLockedBy !== myId) {
+                // Alguém tem a serial
+                const ownerName = users[serialLockedBy] ? users[serialLockedBy].name : "Alguém";
+                elBtnConnectSerial.disabled = true;
+                elBtnConnectSerial.textContent = `Serial: ${ownerName}`;
+                
+                // Se ainda não enviou a mensagem de conexão bem sucedida, envia agora
+                // (Apenas para limpar o "Aguardando..." se ele estava aparecendo)
+                // Mas vamos garantir que a mensagem de status esteja correta
+                const msgs = elChatMessages.innerText;
+                if (msgs.includes("Conectado ao chat")) {
+                    // Mensagem inicial já foi enviada, vamos adicionar o status real
+                    if (msgs.includes("Aguardando") && msgs.includes("Nenhum usuário")) {
+                        // Substitui a mensagem anterior se ainda estiver aguardando
+                        const lastMsg = elChatMessages.lastElementChild;
+                        if(lastMsg) lastMsg.remove();
+                    }
+                    addSystemMessage(`Serial conectada por ${ownerName}.`, 'system');
+                }
+            } else {
+                 // Se o botão já foi desativado e o nome não bate, atualiza
+                 elBtnConnectSerial.textContent = `Serial: ${ownerName}`;
+            }
+        }
+
         async function connectSerial() {
             if (!("serial" in navigator)) {
                 alert("Web Serial API não suportada. Use Chrome/Edge/Opera.");
@@ -730,7 +779,8 @@
 
                 elBtnConnectSerial.textContent = "Serial Conectada";
                 elBtnConnectSerial.disabled = true;
-                elTerminalOutput.textContent = ""; 
+                // Não limpa terminal, mantém o histórico se possível
+                // elTerminalOutput.textContent = ""; 
                 addSystemMessage("Conexão Serial local estabelecida.", 'system');
                 logSerialData("--- Serial Conectada ---", 'rx');
 
@@ -807,7 +857,7 @@
                 serialLockedBy = data.id;
                 if (data.id !== myId) {
                     elBtnConnectSerial.disabled = true;
-                    elBtnConnectSerial.textContent = `Serial em uso por ${data.name}`;
+                    elBtnConnectSerial.textContent = `Serial: ${data.name}`;
                 }
             } else if (data.action === 'unlock') {
                 if (serialLockedBy === data.id) {
@@ -818,13 +868,15 @@
                     }
                 }
             }
+            
+            // Atualiza lista de usuários e indicador visual
             if (users[data.id]) {
                 users[data.id].hasSerial = (data.action === 'lock');
                 renderUsers();
             }
         }
 
-        // --- LÓGICA DE EXIBIÇÃO ---
+        // LÓGICA DE EXIBIÇÃO
         function processIncomingText(text) {
             for (let i =0; i < text.length; i++) {
                 const char = text.charAt(i);
@@ -1010,6 +1062,7 @@
                         logSerialData(chunk, 'tx');
                     }
                     
+                    // Feedback visual local (opcional)
                     if (!isSerialConnected) {
                          processIncomingText(text);
                     }
