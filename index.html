@@ -106,7 +106,7 @@
         button {
             padding: 8px 16px;
             border: none;
-            border-radius: 4px;
+ border-radius: 4px;
             background-color: var(--accent-color);
             color: white;
             cursor: pointer;
@@ -115,6 +115,7 @@
         }
         button:hover:not(:disabled) { opacity: 0.8; }
         button:disabled { background-color: #555; cursor: not-allowed; }
+        button.secondary { background-color: #666; }
 
         .app-title {
             font-size: 1.5rem;
@@ -422,8 +423,6 @@
         const MAX_PACKET_SIZE = 4096;
         const FLUSH_INTERVAL = 200; 
 
-        // --- VARIÁVEL PARA HISTÓRICO (BUFFER LOCAL) ---
-        // Usado para enviar para novos usuários
         let terminalHistory = ""; 
 
         const elUsername = document.getElementById('username');
@@ -443,7 +442,11 @@
 
         let users = {};
 
+        // --- CORREÇÃO DO ENTER ROOM ---
         function enterRoom() {
+            // Debug para verificar se o botão funciona
+            console.log("Botão Entrar clicado!");
+
             const name = elUsername.value.trim();
             const room = elRoomname.value.trim();
 
@@ -460,9 +463,6 @@
             
             elChatInput.disabled = false;
             elBtnSendChat.disabled = false;
-
-            // --- REMOVIDO MENSAGEM "INICIANDO..." ---
-            // O terminal deve ficar limpo ou mostrar apenas histórico
 
             initMQTT();
         }
@@ -494,8 +494,6 @@
 
         function onConnect() {
             isConnectedToMQTT = true;
-            
-            // Mensagem de sistema no chat, não no terminal
             addSystemMessage("Conectado ao chat com sucesso!", 'system');
 
             const topicBase = `multry/${currentRoom}`;
@@ -505,7 +503,7 @@
             mqttClient.subscribe(`${topicBase}/serial/data`);
             mqttClient.subscribe(`${topicBase}/serial/input`);
             mqttClient.subscribe(`${topicBase}/serial/lock`);
-            mqttClient.subscribe(`${topicBase}/serial/history`); // Assina histórico
+            mqttClient.subscribe(`${topicBase}/serial/history`); 
 
             publishMessage(`${topicBase}/presence`, JSON.stringify({
                 type: 'join',
@@ -587,28 +585,24 @@
                     const data = JSON.parse(payload);
                     addChatMessage(data.sender, data.text);
                 }
-                else if (topic === `${topicBase}/presence`) {
+                else if (target === `${topicBase}/presence`) {
                     const data = JSON.parse(payload);
                     handlePresence(data);
                 }
                 else if (topic === `${topicBase}/serial/data`) {
+                    // CORREÇÃO ECO: Dono ignora MQTT RX, Remoto processa MQTT RX
                     if (isSerialConnected) {
+                        // Dono da serial: Já mostrou na tela, ignora o que veio do MQTT para não duplicar.
+                        // Mas registra no log.
                         logSerialData(payload, 'rx');
-                    // Dono da serial recebe dados e atualiza DOM
-                    processIncomingText(payload); 
-                    // Atualiza Histórico (usado para enviar para novos usuários)
-                    updateLocalHistory(payload);
-                } else {
-                    // Remoto recebe dados e mostra na tela
-                    processIncomingText(payload);
-                    logSerialData(payload, 'rx');
-                }
+                    } else {
+                        // Usuário remoto: processa texto recebido.
+                        processIncomingText(payload);
+                        logSerialData(payload, 'rx');
+                    }
                 }
                 else if (topic === `${topicBase}/serial/history`) {
-                    // Novo usuário recebe o histórico inicial
-                    // Reescreve todo o terminal com o histórico
                     elTerminalOutput.textContent = payload; 
-                    // Sincroniza scroll
                     elTerminalOutput.scrollTop = elTerminalOutput.scrollHeight;
                 }
                 else if (topic === `${topicBase}/serial/input`) {
@@ -656,18 +650,14 @@
             elChatMessages.scrollTop = elChatMessages.scrollHeight;
         }
 
-        // --- GESTÃO DE HISTÓRICO E PRESENÇA ---
         function handlePresence(data) {
             if (data.id === myId) return;
 
             if (data.type === 'join') {
-                // Se eu sou o dono da serial e alguém entrou, envio o histórico para ele
+                // Se eu sou dono da serial, envio histórico para o novo usuário
                 if (isSerialConnected) {
                     const topicBase = `multry/${currentRoom}`;
-                    
-                    // Envia o buffer de histórico (limitado para não estourar pacote MQTT)
-                    // Envia os últimos 4000 caracteres para garantir entrega
-                    const historyToSend = terminalHistory.slice(-4000);
+                    const historyToSend = terminalHistory.slice(-4096);
                     publishMessage(`${topicBase}/serial/history`, historyToSend);
                 }
 
@@ -684,9 +674,10 @@
                 }
             } 
             else if (data.type === 'announce') {
-                users[data.id] = { name: data.name, hasSerial: data.hasSerial };
+                users[data.id] = name: data.name, hasSerial: data.hasSerial;
                 
-                // Verificação inicial: Se eu acabei de entrar e vejo que alguém já tem a serial conectada, desabilito meu botão
+                // Verificação de Status Inicial:
+                // Se o botão serial ainda não foi configurado e o anúncio diz que já tem alguém conectado, bloqueia o botão.
                 if (serialLockedBy === null && data.hasSerial) {
                     serialLockedBy = data.id;
                     elBtnConnectSerial.disabled = true;
@@ -702,7 +693,6 @@
             else if (data.type === 'update_serial') {
                 if (users[data.id]) {
                     users[data.id].hasSerial = data.hasSerial;
-                    // Se o dono da serial desconectou, libero meu botão
                     if (serialLockedBy === data.id) {
                         serialLockedBy = null;
                         if (!isSerialConnected) {
@@ -740,11 +730,10 @@
             }
         }
 
-        // --- ATUALIZAÇÃO DO HISTÓRICO ---
+        // --- HISTÓRICO ---
         function updateLocalHistory(text) {
-            // Atualiza variável e limita tamanho para não estourar memória do navegador (max 100KB na string, mas histórico enviado limitado no envio)
             if (terminalHistory.length > 100000) {
-                terminalHistory = terminalHistory.slice(50000); // Mantém metade
+                terminalHistory = terminalHistory.slice(50000); 
             }
             terminalHistory += text;
         }
@@ -764,7 +753,7 @@
                 serialWriter = textEncoder.writable.getWriter();
 
                 const textDecoder = new TextDecoderStream();
-                serialPort.readable.pipeTo(textDecoder.writable).catch(err => console.error("Erro pipe Readable", err));
+                serialPort.readable.pipeTo textDecoder.writable).catch(err => console.error("Erro pipe Readable", err));
                 const reader = textDecoder.readable.getReader();
                 serialReader = reader;
 
@@ -775,12 +764,7 @@
 
                 elBtnConnectSerial.textContent = "Serial Conectada";
                 elBtnConnectSerial.disabled = true;
-                
-                // --- REMOVIDO MENSAGEM "Conexão local..." ---
-                // Também limpa o terminal visual
                 elTerminalOutput.textContent = ""; 
-                
-                // Zera o histórico para a nova sessão
                 terminalHistory = "";
 
                 const topicBase = `multry/${currentRoom}`;
@@ -809,10 +793,12 @@
                     }
                     
                     if (value) {
-                        // 1. Atualiza histórico e visual
+                        // 1. Desenha na tela local
                         processIncomingText(value);
+                        // 2. Atualiza histórico local
                         updateLocalHistory(value);
                         
+                        // 3. Envia para MQTT (Remotos)
                         serialOutBuffer += value;
 
                         if (flushTimer) {
@@ -876,7 +862,7 @@
             }
         }
 
-        // --- EXIBIÇÃO ---
+        // --- LÓGICA DE EXIBIÇÃO ---
         function processIncomingText(text) {
             for (let i =0; i < text.length; i++) {
                 const char = text.charAt(i);
@@ -919,7 +905,7 @@
             elTerminalInputHidden.focus();
         }
 
-        elTerminalInputHidden.addEventListener('input', (e) => {
+        elTerminalInputHidden.addEventListener('input', (e) {
             if (e.inputType === "deleteContentBackward" || e.inputType === "deleteContentForward" || e.inputType === "historyUndo" || e.inputType === "historyRedo") {
                 e.target.value = ''; 
                 return;
@@ -944,7 +930,7 @@
             e.target.value = '';
         });
 
-        elTerminalInputHidden.addEventListener('keydown', (e) => {
+        elTerminalInputHidden.addEventListener('keydown', (e) {
             const topicBase = `multry/${currentRoom}`;
 
             if (e.key === 'Backspace') {
@@ -1025,7 +1011,7 @@
             div.className = (direction === 'tx') ? 'log-tx' : 'log-rx';
             div.textContent = `[${timestamp}] ${direction === 'tx' ? '>>' : '<<'} ${cleanData}`;
             elSerialLog.appendChild(div);
-            elSerialLog.scrollTop = elSerialLog.scrollHeight;
+            elSerialLog.scrollTop = elSerialLog.scrollTop = elSerialLog.scrollHeight;
         }
 
         function escapeHtml(text) {
@@ -1036,13 +1022,13 @@
 
         // --- FUNÇÃO COLAR (MODAL) ---
         function pasteToSerial() {
-            elPasteModal.style.display = 'flex';
+            elPasteModal.style.display = flex';
             elPasteTextArea.value = '';
             elPasteTextArea.focus();
         }
 
         function closePasteModal() {
-            elPasteModal.style.display = 'none';
+            elPasteModal.style.display = none;
             focusTerminalInput();
         }
 
@@ -1060,6 +1046,7 @@
                         logSerialData(chunk, 'tx');
                     }
                     
+                    // Se for remoto, mostre o texto colado na tela local
                     if (!isSerialConnected) {
                         processIncomingText(text);
                         updateLocalHistory(text);
