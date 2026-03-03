@@ -82,16 +82,34 @@
             flex-wrap: wrap;
         }
 
+        /* --- CSS Atualizado para o texto estruturado --- */
         .instructions-box {
             background-color: #1a1a1a;
-            padding: 15px;
+            padding: 20px;
             border-radius: 4px;
             text-align: left;
             margin-bottom: 20px;
             font-size: 0.9rem;
-            line-height: 1.5;
+            line-height: 1.6;
             color: #bbb;
             border-left: 4px solid var(--accent-color);
+        }
+        .instructions-box h3 {
+            color: var(--accent-color);
+            margin-top: 0;
+            margin-bottom: 10px;
+            font-size: 1.1rem;
+        }
+        .instructions-box p {
+            margin-bottom: 10px;
+        }
+        .instructions-box ul {
+            margin-bottom: 10px;
+            padding-left: 20px;
+            list-style-type: disc;
+        }
+        .instructions-box li {
+            margin-bottom: 5px;
         }
 
         input[type="text"] {
@@ -327,9 +345,16 @@
         <div class="login-box">
             <div class="login-title">MULtty</div>
             
-            <!-- INSTRUÇÕES -->
+            <!-- TEXTO REESCRITO E ESTRUTURADO -->
             <div class="instructions-box">
-                "Essa página é um terminal serial colaborativo. coloque um nome, entre em uma sala (se não existir ela será criada). Ao entrar o terminal vai aparecer, assim como um chat. Um dos usuários conecta seu navegador a serial através do botão Conectar Serial. Todos na sala poderão interagir com a interface serial. Temos então um terminal serial estilo Putty de uma maneira colaborativa, que pode ser usado para remotamente configurar equipamentos ou monitorar processos."
+                <h3>Bem-vindo ao MULtty</h3>
+                <p>O MULtty é um <strong>terminal serial colaborativo</strong> baseado na web, projetado para permitir o acesso remoto e compartilhado a uma porta serial entre múltiplos usuários, funcionando de forma semelhante ao Putty.</p>
+                <ul>
+                    <li><strong>Identificação:</strong> Para começar, insira seu Nome e entre em uma Sala. A sala é criada automaticamente caso não exista.</li>
+                    <li><strong>Conexão:</strong> Um dos usuários deve clicar em <strong>"Conectar Serial"</strong> para vincular o navegador à porta física (USB/Serial).</li>
+                    <li><strong>Colaboração:</strong> Uma vez conectado, todos os usuários na sala podem interagir com a interface serial, receber dados e monitorar processos em tempo real.</li>
+                </ul>
+                <p>É ideal para equipes que precisam configurar equipamentos, fazer debugging remoto ou ensinar sistemas embarcados de forma compartilhada.</p>
             </div>
 
             <!-- CAMPOS DE ENTRADA -->
@@ -663,9 +688,7 @@
             else if (data.type === 'announce') {
                 users[data.id] = { name: data.name, hasSerial: data.hasSerial };
                 
-                // --- CORREÇÃO: Verificação imediata se esse usuário já tem a serial ---
                 if (data.hasSerial) {
-                    // Dispara o evento de atualização de lock para o usuário atual
                     updateSerialLock({ action: 'lock', id: data.id, name: data.name });
                 }
             }
@@ -714,8 +737,7 @@
                 return;
             }
 
-            // --- CORREÇÃO: Verificação de Lock antes de conectar ---
-            // Se alguém já tem a serial, impede a conexão
+            // Verificação de Lock antes de conectar
             if (serialLockedBy && serialLockedBy !== myId) {
                 const ownerName = users[serialLockedBy]?.name || "um usuário";
                 alert(`A serial já está conectada por ${ownerName}.`);
@@ -740,7 +762,6 @@
                 if (flushTimer) clearTimeout(flushTimer);
                 flushTimer = null;
 
-                // Só limpa e mostra mensagem se eu realmente conseguir conectar
                 elTerminalOutput.textContent = ""; 
                 addSystemMessage("Aguardando conexão serial...", 'system');
                 logSerialData("--- Serial Conectada ---", 'rx');
@@ -835,12 +856,13 @@
             }
         }
 
-        // --- LÓGICA DE EXIBIÇÃO ---
+        // --- LÓGICA DE EXIBIÇÃO (Filtro de Código de Controle Visual) ---
         function processIncomingText(text) {
             for (let i =0; i < text.length; i++) {
                 const char = text.charAt(i);
                 const code = text.charCodeAt(i);
 
+                // Ignora caracteres estranhos (esc) e processa apenas os desejados
                 if (code === 9 || code === 10 || code === 13 || code === 8 || code === 127) {
                     if (code === 8 || code === 127) {
                         executeBackspaceOnDOM();
@@ -878,12 +900,15 @@
             elTerminalInputHidden.focus();
         }
 
+        // --- INPUT (ENVIO E TRATAMENTO RIGOROSO DE CARACTERES ---
         elTerminalInputHidden.addEventListener('input', (e) => {
+            // Ignora eventos de deleção (já tratados no keydown)
             if (e.inputType === "deleteContentBackward" || e.inputType === "deleteContentForward" || e.inputType === "historyUndo" || e.inputType === "historyRedo") {
                 e.target.value = ''; 
                 return;
             }
 
+            // Aceita APENAS insertText. 
             if (e.inputType !== "insertText") {
                 e.target.value = '';
                 return;
@@ -893,6 +918,7 @@
 
             if (text && text.length === 1) {
                 const code = text.charCodeAt(0);
+                // Apenas envia se for imprimível (>= 32)
                 if (code >= 32) {
                     if (isConnectedToMQTT) {
                         const topicBase = `multry/${currentRoom}`;
@@ -908,9 +934,9 @@
 
             if (e.key === 'Backspace') {
                 e.preventDefault();
-                
+                // Apaga visualmente
                 executeBackspaceOnDOM();
-                
+                // Envia Backspace padrão (\x08)
                 if (isConnectedToMQTT) {
                     publishMessage(`${topicBase}/serial/input`, '\x08'); 
                 }
